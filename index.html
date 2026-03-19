@@ -41,10 +41,17 @@ html, body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* ─── Grain ─── */
-#grain {
-  position: fixed; inset: 0; pointer-events: none; z-index: 9999;
-  opacity: 0.4;
+/* ─── Grain (scoped to chat panel only) ─── */
+#chat-panel::before {
+  content: '';
+  position: absolute; inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.35;
+  mix-blend-mode: soft-light;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 200px 200px;
+  background-repeat: repeat;
 }
 
 /* ─── Login View ─── */
@@ -305,6 +312,11 @@ html, body {
   display: flex; flex-direction: column;
   background: var(--bg);
   position: relative; overflow: hidden;
+  isolation: isolate;
+}
+/* Lift chat panel children above grain */
+.chat-header, #messages-viewport, #input-zone, #scroll-btn {
+  position: relative; z-index: 1;
 }
 
 /* Chat Header */
@@ -883,15 +895,6 @@ html, body {
 </head>
 <body>
 
-<!-- SVG Grain Filter -->
-<svg id="grain" xmlns="http://www.w3.org/2000/svg">
-  <filter id="grain-filter">
-    <feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch"/>
-    <feColorMatrix type="saturate" values="0"/>
-  </filter>
-  <rect width="100%" height="100%" filter="url(#grain-filter)" opacity="1"/>
-</svg>
-
 <!-- Login View -->
 <div id="login-view">
   <div class="login-inner">
@@ -1108,7 +1111,7 @@ html, body {
 
 <script>
 // ─── State ───────────────────────────────────────────────────────────────────
-const BACKEND_URL = 'http://192.168.1.12:3001';
+const BACKEND_URL = 'https://occurrence-scripting-distribution-icq.trycloudflare.com';
 let socket = null;
 let isConnected = false;
 let currentJid = null;
@@ -1155,18 +1158,31 @@ const SEED_MESSAGES = {
 };
 
 // ─── Socket.IO ───────────────────────────────────────────────────────────────
+let socketConnected = false;
+let seedFallbackTimer = null;
+
 function initSocket() {
   try {
-    socket = io(BACKEND_URL, { timeout: 5000, reconnectionAttempts: 3 });
+    socket = io(BACKEND_URL, {
+      transports: ['websocket', 'polling'],
+      timeout: 8000,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 2000,
+    });
 
+    // On socket connect: ask server if we need QR or are ready
     socket.on('connect', () => {
       console.log('Socket connected');
+      socketConnected = true;
+      if (seedFallbackTimer) { clearTimeout(seedFallbackTimer); seedFallbackTimer = null; }
+      // Ask server for auth state — it will respond with 'qr' or 'ready'
+      socket.emit('request_qr');
     });
 
     socket.on('qr', ({ dataUrl }) => {
       showLoginView();
       const container = document.getElementById('qr-container');
-      container.innerHTML = `<img id="qr-img" src="${dataUrl}" alt="QR Code" />`;
+      container.innerHTML = `<img id="qr-img" src="${dataUrl}" alt="QR Code" style="width:130px;height:130px;display:block;border-radius:4px;" />`;
     });
 
     socket.on('ready', ({ status, phone }) => {
@@ -1175,9 +1191,9 @@ function initSocket() {
       loadChats();
     });
 
-    socket.on('disconnected', () => {
+    socket.on('disconnected', ({ reason }) => {
       isConnected = false;
-      showLoginView();
+      if (reason === 'logged_out') showLoginView();
     });
 
     socket.on('chats', (chats) => {
@@ -1197,7 +1213,9 @@ function initSocket() {
       updateLastMessage(jid, message);
       if (!message.fromMe) {
         const conv = findConvByJid(jid);
-        showToast(message.senderName || conv?.name || 'New message', message.body || '📎 Media', conv?.bg, conv?.color, conv?.initials);
+        const initials = conv?.initials || (message.senderName||'?').slice(0,2).toUpperCase();
+        showToast(message.senderName || conv?.name || 'New message', message.body || '📎 Media',
+          conv?.bg || '#1a2e1a', conv?.color || '#4ADE80', initials);
       }
     });
 
@@ -1209,12 +1227,23 @@ function initSocket() {
       showToast('Scheduled', `Sends at ${new Date(sendAt).toLocaleTimeString()}`, '#1a2e1a', '#4ADE80', '✓');
     });
 
-    socket.on('connect_error', () => {
-      // Backend unavailable — use seed data
-      useSeedData();
+    socket.on('connect_error', (err) => {
+      console.warn('Socket connect error:', err.message);
+      socketConnected = false;
+      // Only fall back to seed if we haven't gotten a QR or ready event yet
+      if (!isConnected && !seedFallbackTimer) {
+        seedFallbackTimer = setTimeout(() => {
+          if (!isConnected) useSeedData();
+        }, 4000);
+      }
+    });
+
+    socket.on('disconnect', () => {
+      socketConnected = false;
     });
 
   } catch(e) {
+    console.warn('Socket init failed:', e);
     useSeedData();
   }
 }
@@ -1238,23 +1267,66 @@ function findConvByJid(jid) {
   return liveConvs.find(c => c.jid === jid);
 }
 
+// Color palette for live chats (cycles through)
+const CHAT_COLORS = [
+  { bg: '#1a2e1a', color: '#4ADE80' },
+  { bg: '#1e1a2e', color: '#a78bfa' },
+  { bg: '#2e1a22', color: '#f472b6' },
+  { bg: '#1a2428', color: '#38bdf8' },
+  { bg: '#2e2a1a', color: '#fbbf24' },
+  { bg: '#1a1e2e', color: '#60a5fa' },
+  { bg: '#2a1a2e', color: '#c084fc' },
+];
+
 function renderLiveChats(chats) {
   liveConvs = chats;
+  // If no chats yet (backend just connected, no history), keep seed convs
+  if (!chats || chats.length === 0) {
+    renderSeedConvs();
+    return;
+  }
   const list = document.getElementById('sidebar-list');
   list.innerHTML = '';
   const sl = document.createElement('div');
   sl.className = 'section-label'; sl.textContent = 'recent';
   list.appendChild(sl);
-  chats.forEach(chat => {
+  chats.forEach((chat, i) => {
+    const palette = CHAT_COLORS[i % CHAT_COLORS.length];
+    const name = chat.name || chat.jid.split('@')[0];
+    const initials = name.split(' ').map(w => w[0]).join('').slice(0,2).toUpperCase();
     const item = createConvItem({
-      id: chat.jid, name: chat.name || chat.jid.split('@')[0],
-      bg: '#1a2e1a', color: '#4ADE80', initials: (chat.name || '??').slice(0,2).toUpperCase(),
+      id: chat.jid, name,
+      bg: palette.bg, color: palette.color, initials,
       online: false, unread: chat.unreadCount || 0,
       preview: chat.lastMessage || '', time: formatTime(chat.lastMessageTime),
       jid: chat.jid
     });
     list.appendChild(item);
   });
+}
+
+function incrementUnread(jid) {
+  const item = document.querySelector(`.conv-item[data-id="${CSS.escape(jid)}"]`);
+  if (!item) return;
+  let badge = item.querySelector('.conv-badge');
+  if (!badge) {
+    badge = document.createElement('span');
+    badge.className = 'conv-badge';
+    badge.textContent = '1';
+    item.querySelector('.conv-row2')?.appendChild(badge);
+  } else {
+    const n = parseInt(badge.textContent) || 0;
+    badge.textContent = n + 1;
+  }
+}
+
+function updateLastMessage(jid, msg) {
+  const item = document.querySelector(`.conv-item[data-id="${CSS.escape(jid)}"]`);
+  if (!item) return;
+  const preview = item.querySelector('.conv-preview');
+  if (preview) preview.textContent = (msg.fromMe ? 'You: ' : '') + (msg.body || '📎');
+  const time = item.querySelector('.conv-time');
+  if (time) time.textContent = formatTime(msg.timestamp);
 }
 
 function renderLiveMessages(messages) {
@@ -1309,15 +1381,23 @@ function appendLiveMessage(msg, animate = true) {
   scrollToBottom();
 }
 
-function markSent() {}
-function incrementUnread(jid) {}
-function updateLastMessage(jid, msg) {}
+function markSent() {
+  // Upgrade last sent bubble's single tick to double
+  const ticks = [...document.querySelectorAll('.msg-group.me .read-ticks')].pop();
+  if (ticks && ticks.textContent === '✓') ticks.textContent = '✓✓';
+}
 
 function useSeedData() {
-  // Backend not available, show seed UI
+  if (isConnected) return; // Don't override live data
+  console.log('Backend unreachable — using seed demo data');
   document.getElementById('login-view').classList.add('hidden');
   renderSeedConvs();
   loadConv('jake');
+  // No Sofia toast in live mode; only in demo
+  setTimeout(() => {
+    const sofia = SEED_CONVS.find(c => c.id === 'sofia');
+    if (sofia && !isConnected) showToast(sofia.name, sofia.preview, sofia.bg, sofia.color, sofia.initials);
+  }, 3000);
 }
 
 // ─── Seed Rendering ──────────────────────────────────────────────────────────
@@ -1853,16 +1933,10 @@ document.addEventListener('DOMContentLoaded', () => {
   // Try socket, fallback to seed
   initSocket();
 
-  // If socket doesn't connect in 2s, use seed data
-  setTimeout(() => {
-    if (!isConnected && !document.getElementById('login-view').classList.contains('hidden')) {
-      // Check if QR was shown; if not, use seed
-      const qrContainer = document.getElementById('qr-container');
-      if (!qrContainer.querySelector('#qr-img')) {
-        useSeedData();
-      }
-    }
-  }, 2500);
+  // If socket fails to connect within 6s, fall back to seed demo
+  seedFallbackTimer = setTimeout(() => {
+    if (!isConnected && !socketConnected) useSeedData();
+  }, 6000);
 
   // Nav rail
   document.querySelectorAll('.rail-btn[data-section]').forEach(btn => {
@@ -2011,13 +2085,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // Sofia Maret toast after 3s
-  setTimeout(() => {
-    const sofia = SEED_CONVS.find(c => c.id === 'sofia');
-    if (sofia) showToast(sofia.name, sofia.preview, sofia.bg, sofia.color, sofia.initials);
-  }, 3000);
-
-  // Init detail panel
+  // Init detail panel with placeholder until real conv loads
   renderDetailContact(SEED_CONVS[0]);
 });
 </script>
