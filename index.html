@@ -1219,6 +1219,13 @@ function initSocket() {
       }
     });
 
+    socket.on('messages_update', ({ jid }) => {
+      // Backend got new history for this jid — refresh if it's open
+      if (jid === currentJid) {
+        socket.emit('get_messages', { jid, limit: 50 });
+      }
+    });
+
     socket.on('message_sent', ({ success, id }) => {
       if (success) markSent();
     });
@@ -1229,24 +1236,28 @@ function initSocket() {
 
     // Contact name resolution — updates sidebar item and header when name resolves
     socket.on('contact_name', ({ jid, name }) => {
-      // Update sidebar item name + initials
-      const item = document.querySelector(`.conv-item[data-id="${CSS.escape(jid)}"]`);
-      if (item) {
-        const nameEl = item.querySelector('.conv-name');
-        if (nameEl && looksLikePhone(nameEl.textContent)) nameEl.textContent = name;
-        const av = item.querySelector('.conv-avatar');
-        if (av && looksLikePhone(av.textContent.trim())) {
-          // Replace the text node (initials) without removing the online-dot child
-          const textNode = [...av.childNodes].find(n => n.nodeType === Node.TEXT_NODE);
-          if (textNode) textNode.textContent = '\n      ' + makeInitials(name) + '\n      ';
+      if (!name || !looksLikePhone(name) === false) {
+        // Update sidebar item
+        const item = document.querySelector(`.conv-item[data-id="${CSS.escape(jid)}"]`);
+        if (item) {
+          const nameEl = item.querySelector('.conv-name');
+          if (nameEl && looksLikePhone(nameEl.textContent)) nameEl.textContent = name;
+          const avText = item.querySelector('.conv-av-text');
+          if (avText && looksLikePhone(avText.textContent)) avText.textContent = makeInitials(name);
         }
-      }
-      // Update chat header if this is the open conversation
-      if (jid === currentJid) {
-        const hdrName = document.getElementById('chat-hdr-name');
-        if (hdrName && looksLikePhone(hdrName.textContent)) hdrName.textContent = name;
-        const hdrAv = document.getElementById('chat-hdr-avatar');
-        if (hdrAv && looksLikePhone(hdrAv.textContent.trim())) hdrAv.textContent = makeInitials(name);
+        // Update chat header if this is the open conversation
+        if (jid === currentJid) {
+          const hdrName = document.getElementById('chat-hdr-name');
+          if (hdrName && looksLikePhone(hdrName.textContent)) hdrName.textContent = name;
+          const hdrAv = document.getElementById('chat-hdr-avatar');
+          if (hdrAv && looksLikePhone(hdrAv.textContent.trim())) hdrAv.textContent = makeInitials(name);
+          // Update detail panel
+          if (currentConv && looksLikePhone(currentConv.name)) {
+            currentConv.name = name;
+            currentConv.initials = makeInitials(name);
+            renderDetailContact(currentConv);
+          }
+        }
       }
     });
 
@@ -1277,6 +1288,9 @@ function loadChats() {
 
 function openConversation(jid) {
   currentJid = jid;
+  // Show loading indicator
+  const vp = document.getElementById('messages-viewport');
+  vp.innerHTML = '<div style="flex:1;display:flex;align-items:center;justify-content:center;color:var(--muted);font-family:var(--mono);font-size:12px;padding:40px">loading…</div>';
   socket?.emit('get_messages', { jid, limit: 50 });
   socket?.emit('mark_read', jid);
 }
@@ -1367,8 +1381,31 @@ function updateLastMessage(jid, msg) {
 function renderLiveMessages(messages) {
   const vp = document.getElementById('messages-viewport');
   vp.innerHTML = '';
-  addDaySeparator(vp, 'today');
+  if (!messages || messages.length === 0) {
+    const empty = document.createElement('div');
+    empty.style.cssText = 'flex:1;display:flex;align-items:center;justify-content:center;color:var(--muted);font-family:var(--mono);font-size:12px;padding:40px';
+    empty.textContent = 'no messages yet';
+    vp.appendChild(empty);
+    scrollToBottom();
+    return;
+  }
+  let lastDateStr = null;
   messages.forEach(msg => {
+    const d = msg.timestamp ? new Date(msg.timestamp * 1000) : null;
+    if (d && !isNaN(d)) {
+      const now = new Date();
+      let label;
+      if (d.toDateString() === now.toDateString()) label = 'today';
+      else {
+        const yesterday = new Date(now); yesterday.setDate(yesterday.getDate() - 1);
+        if (d.toDateString() === yesterday.toDateString()) label = 'yesterday';
+        else label = d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
+      }
+      if (label !== lastDateStr) {
+        addDaySeparator(vp, label);
+        lastDateStr = label;
+      }
+    }
     appendLiveMessage(msg, false);
   });
   scrollToBottom();
@@ -1378,11 +1415,14 @@ function appendLiveMessage(msg, animate = true) {
   const vp = document.getElementById('messages-viewport');
   const group = document.createElement('div');
   group.className = `msg-group ${msg.fromMe ? 'me' : 'them'}`;
-  if (!msg.fromMe && msg.senderName) {
+  // Show sender label only in group chats or when we have a name
+  const isGroup = currentJid && currentJid.endsWith('@g.us');
+  if (!msg.fromMe && (isGroup || msg.senderName)) {
     const label = document.createElement('div');
     label.className = 'msg-sender-label';
-    label.textContent = `${msg.senderName} · ${formatTime(msg.timestamp)}`;
-    group.appendChild(label);
+    const displayName = msg.senderName || (isGroup ? '' : (currentConv?.name || ''));
+    if (displayName) label.textContent = `${displayName} · ${formatMsgTime(msg.timestamp)}`;
+    if (displayName) group.appendChild(label);
   }
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
@@ -1400,7 +1440,7 @@ function appendLiveMessage(msg, animate = true) {
   footer.className = 'bubble-footer';
   const ts = document.createElement('span');
   ts.className = 'bubble-time';
-  ts.textContent = formatTime(msg.timestamp);
+  ts.textContent = formatMsgTime(msg.timestamp);
   footer.appendChild(ts);
   if (msg.fromMe) {
     const ticks = document.createElement('span');
@@ -1413,7 +1453,7 @@ function appendLiveMessage(msg, animate = true) {
   const typing = vp.querySelector('.msg-group .typing-indicator');
   if (typing) typing.closest('.msg-group')?.remove();
   vp.appendChild(group);
-  scrollToBottom();
+  if (animate) scrollToBottom();
 }
 
 function markSent() {
@@ -1461,7 +1501,7 @@ function createConvItem(conv) {
   el.innerHTML = `
     <div class="conv-indicator"></div>
     <div class="conv-avatar" style="background:${conv.bg};color:${conv.color}">
-      ${conv.initials}
+      <span class="conv-av-text">${conv.initials}</span>
       ${conv.online ? '<div class="conv-online-dot"></div>' : ''}
     </div>
     <div class="conv-info">
@@ -1483,7 +1523,9 @@ function createConvItem(conv) {
     // Load conversation
     if (conv.jid) {
       currentJid = conv.jid;
+      currentConv = conv;
       updateChatHeader(conv);
+      renderDetailContact(conv);
       openConversation(conv.jid);
     } else {
       loadConv(conv.id, conv);
@@ -1619,7 +1661,7 @@ function renderDetailContact(c) {
   const colors = ['#1a2e1a', '#1e1a2e', '#2e1a22', '#1a2428', '#2e2a1a', '#1a1e2e'];
   body.innerHTML = `
     <div class="contact-card">
-      <div class="contact-card-avatar" style="background:${c.bg};color:${c.color}">${c.initials}</div>
+      <div class="contact-card-avatar" style="background:${c.bg || '#1a2e1a'};color:${c.color || '#4ADE80'}">${escHtml(c.initials || makeInitials(c.name))}</div>
       <div class="contact-card-name">${escHtml(c.name)}</div>
       <div class="contact-card-status">
         ${c.online ? '<div class="live-dot"></div><span>online</span>' : '<span style="color:var(--muted)">last seen recently</span>'}
@@ -1918,7 +1960,22 @@ function formatTime(ts) {
   if (!ts) return '';
   const d = new Date(ts * 1000);
   if (isNaN(d)) return '';
-  return d.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) {
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+  const yesterday = new Date(now); yesterday.setDate(yesterday.getDate() - 1);
+  if (d.toDateString() === yesterday.toDateString()) return 'Yesterday';
+  const diffDays = Math.floor((now - d) / 86400000);
+  if (diffDays < 7) return d.toLocaleDateString([], { weekday: 'short' });
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+function formatMsgTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts * 1000);
+  if (isNaN(d)) return '';
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
 function closeAllOverlays() {
