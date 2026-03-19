@@ -1227,6 +1227,29 @@ function initSocket() {
       showToast('Scheduled', `Sends at ${new Date(sendAt).toLocaleTimeString()}`, '#1a2e1a', '#4ADE80', '✓');
     });
 
+    // Contact name resolution — updates sidebar item and header when name resolves
+    socket.on('contact_name', ({ jid, name }) => {
+      // Update sidebar item name + initials
+      const item = document.querySelector(`.conv-item[data-id="${CSS.escape(jid)}"]`);
+      if (item) {
+        const nameEl = item.querySelector('.conv-name');
+        if (nameEl && looksLikePhone(nameEl.textContent)) nameEl.textContent = name;
+        const av = item.querySelector('.conv-avatar');
+        if (av && looksLikePhone(av.textContent.trim())) {
+          // Replace the text node (initials) without removing the online-dot child
+          const textNode = [...av.childNodes].find(n => n.nodeType === Node.TEXT_NODE);
+          if (textNode) textNode.textContent = '\n      ' + makeInitials(name) + '\n      ';
+        }
+      }
+      // Update chat header if this is the open conversation
+      if (jid === currentJid) {
+        const hdrName = document.getElementById('chat-hdr-name');
+        if (hdrName && looksLikePhone(hdrName.textContent)) hdrName.textContent = name;
+        const hdrAv = document.getElementById('chat-hdr-avatar');
+        if (hdrAv && looksLikePhone(hdrAv.textContent.trim())) hdrAv.textContent = makeInitials(name);
+      }
+    });
+
     socket.on('connect_error', (err) => {
       console.warn('Socket connect error:', err.message);
       socketConnected = false;
@@ -1267,6 +1290,14 @@ function findConvByJid(jid) {
   return liveConvs.find(c => c.jid === jid);
 }
 
+// ─── Name helpers ─────────────────────────────────────────────────────────────
+function looksLikePhone(s) {
+  return /^\+?\d[\d\s\-().]{4,}$/.test((s || '').trim());
+}
+function makeInitials(name) {
+  return (name || '?').split(' ').filter(Boolean).map(w => w[0]).join('').slice(0, 2).toUpperCase();
+}
+
 // Color palette for live chats (cycles through)
 const CHAT_COLORS = [
   { bg: '#1a2e1a', color: '#4ADE80' },
@@ -1292,16 +1323,20 @@ function renderLiveChats(chats) {
   list.appendChild(sl);
   chats.forEach((chat, i) => {
     const palette = CHAT_COLORS[i % CHAT_COLORS.length];
-    const name = chat.name || chat.jid.split('@')[0];
-    const initials = name.split(' ').map(w => w[0]).join('').slice(0,2).toUpperCase();
+    const rawName = chat.name || chat.jid.split('@')[0];
+    const initials = makeInitials(rawName);
     const item = createConvItem({
-      id: chat.jid, name,
+      id: chat.jid, name: rawName,
       bg: palette.bg, color: palette.color, initials,
       online: false, unread: chat.unreadCount || 0,
       preview: chat.lastMessage || '', time: formatTime(chat.lastMessageTime),
       jid: chat.jid
     });
     list.appendChild(item);
+    // For non-group chats with phone-number names, ask backend to resolve
+    if (!chat.jid.endsWith('@g.us') && looksLikePhone(rawName) && socket) {
+      socket.emit('get_contact_name', chat.jid);
+    }
   });
 }
 
@@ -1469,11 +1504,15 @@ function loadConv(id, conv) {
 
 function updateChatHeader(c) {
   const av = document.getElementById('chat-hdr-avatar');
-  av.style.background = c.bg;
-  av.style.color = c.color;
-  av.textContent = c.initials;
+  av.style.background = c.bg || '#1a2e1a';
+  av.style.color = c.color || '#4ADE80';
+  av.textContent = c.initials || makeInitials(c.name);
   document.getElementById('chat-hdr-name').textContent = c.name;
   document.getElementById('chat-hdr-status').textContent = c.online ? 'online · synced' : 'last seen recently';
+  // If name is a phone number and this isn't a group, ask backend to resolve it
+  if (c.jid && !c.jid.endsWith('@g.us') && looksLikePhone(c.name) && socket) {
+    socket.emit('get_contact_name', c.jid);
+  }
 }
 
 function renderSeedMessages(id) {
