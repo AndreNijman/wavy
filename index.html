@@ -1236,27 +1236,26 @@ function initSocket() {
 
     // Contact name resolution — updates sidebar item and header when name resolves
     socket.on('contact_name', ({ jid, name }) => {
-      if (!name || !looksLikePhone(name) === false) {
-        // Update sidebar item
-        const item = document.querySelector(`.conv-item[data-id="${CSS.escape(jid)}"]`);
-        if (item) {
-          const nameEl = item.querySelector('.conv-name');
-          if (nameEl && looksLikePhone(nameEl.textContent)) nameEl.textContent = name;
-          const avText = item.querySelector('.conv-av-text');
-          if (avText && looksLikePhone(avText.textContent)) avText.textContent = makeInitials(name);
-        }
-        // Update chat header if this is the open conversation
-        if (jid === currentJid) {
-          const hdrName = document.getElementById('chat-hdr-name');
-          if (hdrName && looksLikePhone(hdrName.textContent)) hdrName.textContent = name;
-          const hdrAv = document.getElementById('chat-hdr-avatar');
-          if (hdrAv && looksLikePhone(hdrAv.textContent.trim())) hdrAv.textContent = makeInitials(name);
-          // Update detail panel
-          if (currentConv && looksLikePhone(currentConv.name)) {
-            currentConv.name = name;
-            currentConv.initials = makeInitials(name);
-            renderDetailContact(currentConv);
-          }
+      if (!name) return;
+      // Update sidebar item
+      const item = document.querySelector(`.conv-item[data-id="${CSS.escape(jid)}"]`);
+      if (item) {
+        const nameEl = item.querySelector('.conv-name');
+        if (nameEl && looksLikePhone(nameEl.textContent)) nameEl.textContent = name;
+        const avText = item.querySelector('.conv-av-text');
+        if (avText && looksLikePhone(avText.textContent)) avText.textContent = makeInitials(name);
+      }
+      // Update chat header if this is the open conversation
+      if (jid === currentJid) {
+        const hdrName = document.getElementById('chat-hdr-name');
+        if (hdrName && looksLikePhone(hdrName.textContent)) hdrName.textContent = name;
+        const hdrAv = document.getElementById('chat-hdr-avatar');
+        if (hdrAv && looksLikePhone(hdrAv.textContent.trim())) hdrAv.textContent = makeInitials(name);
+        // Update detail panel
+        if (currentConv && looksLikePhone(currentConv.name)) {
+          currentConv.name = name;
+          currentConv.initials = makeInitials(name);
+          renderDetailContact(currentConv);
         }
       }
     });
